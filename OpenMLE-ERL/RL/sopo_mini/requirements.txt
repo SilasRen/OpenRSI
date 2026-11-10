@@ -1,0 +1,7 @@
+# Offline SOPO validation (no Docker, no sandbox service, no external API)
+torch>=2.1
+transformers>=4.45
+numpy
+pandas
+scikit-learn>=1.3
+matplotlib  # optional: search_curves.png
