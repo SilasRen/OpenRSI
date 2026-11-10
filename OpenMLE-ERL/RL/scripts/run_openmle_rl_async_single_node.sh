@@ -26,6 +26,11 @@ if [ "$#" -ne 0 ]; then
     exit 2
 fi
 export OPENMLE_RL_CONFIG="${CONFIG_FILE}"
+SOPO_DATA_SOURCE="slime.rollout.data_source.RolloutDataSourceWithBuffer"
+if [ "${SOPO_CURRICULUM:-1}" = "1" ]; then
+    SOPO_DATA_SOURCE="sopo_data_source.SopoDataSource"
+    SOPO_STEPS="${SOPO_STEPS:-2}"
+fi
 SANDBOX_MODE="${SANDBOX_MODE:-remote}"
 if [ "${SANDBOX_MODE}" != "remote" ]; then
     echo "SANDBOX_MODE=${SANDBOX_MODE} is not integrated yet; use remote until the local sandbox contract is released." >&2
@@ -491,6 +496,7 @@ MISC_ARGS=(
 )
 
 CUSTOM_ARGS=(
+   --data-source-path "${SOPO_DATA_SOURCE}"
    --custom-generate-function-path generate_mle.generate
    --custom-rm-path generate_mle.reward_func
    --custom-rollout-log-function-path patch_rollout.patched_log_rollout_data
@@ -530,6 +536,12 @@ RUNTIME_ENV_JSON="{
     \"SLIME_DISABLE_SAVE\": \"${SLIME_DISABLE_SAVE:-0}\",
     \"LEADERBOARD_ROOT\": \"${LEADERBOARD_ROOT}\",
     \"LEADERBOARD_ROOTS\": \"${LEADERBOARD_ROOTS}\",
+    \"SOPO_CURRICULUM\": \"${SOPO_CURRICULUM:-1}\",
+    \"SOPO_EXPLORATION\": \"${SOPO_EXPLORATION:-0.3}\",
+    \"SOPO_PRIORITY_DECAY\": \"${SOPO_PRIORITY_DECAY:-0.99}\",
+    \"SOPO_STEPS\": \"${SOPO_STEPS:-2}\",
+    \"SOPO_LAMBDA\": \"${SOPO_LAMBDA:-1.0}\",
+    \"SOPO_REWARD_MODE\": \"${SOPO_REWARD_MODE:-best}\",
     \"USE_SCORE2REWARD\": \"${USE_SCORE2REWARD}\",
     \"REWARD_MAPPING_MODE\": \"${REWARD_MAPPING_MODE}\",
     \"STATIC_REWARD_MAPPING_MODE\": \"${STATIC_REWARD_MAPPING_MODE}\",

@@ -1,6 +1,7 @@
 # Single-turn operators generation for MLE agent with remote sandbox
 
 import asyncio
+import copy
 import json
 import httpx
 import logging
@@ -376,6 +377,9 @@ async def _resolve_group_reward_mapping(
     score: float | None,
     base_reward: float,
 ) -> dict[str, object]:
+    if metadata.get("sopo_continuation"):
+        # Auxiliary nodes never enter the training siblings' barrier.
+        return {"base_reward": compute_static_score_reward(score, metadata), "context": {}}
     task_key, task_id, task_name = _dynamic_bound_task_identity(metadata)
     generation_aborted = bool(metadata.get("generation_aborted"))
     default_context = _build_adaptive_bound_metadata_context(
@@ -1003,6 +1007,13 @@ async def generate(args, sample: Sample, sampling_params, evaluation) -> Sample:
     assert evaluation is not None, "evaluation must be provided"
     print(f"[GENERATE] evaluation: {evaluation}")
 
+    from sopo import settings, program_snapshot
+    sopo_steps, _ = settings()
+    if sopo_steps and not evaluation:
+        sample.metadata["sopo_source_metadata"] = copy.deepcopy({
+            k: v for k, v in sample.metadata.items() if not k.startswith("sopo_")
+        })
+        sample.metadata["sopo_sampling_params"] = copy.deepcopy(sampling_params)
     state = GenerateState(args)
     url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
 
@@ -1064,7 +1075,13 @@ async def generate(args, sample: Sample, sampling_params, evaluation) -> Sample:
         n_samples_per_prompt = N_SAMPLES_PER_PROMPT
 
     # cache_key is not None and
-    if cache_key in _parent_selection_cache:
+    replay = sample.metadata.get("sopo_replay_selection") if not evaluation else None
+    if replay:
+        input_messages = copy.deepcopy(replay["messages"])
+        parent_program = Program.from_dict(replay["parent"]) if replay["parent"] else None
+        secondary_parent_program = Program.from_dict(replay["secondary"]) if replay["secondary"] else None
+        mode = replay["mode"]
+    elif cache_key in _parent_selection_cache:
         # Reuse cached result for this group
         async with _get_loop_lock("parent_selection_cache"):
             cache_entry = _parent_selection_cache.get(cache_key)
@@ -1172,6 +1189,12 @@ async def generate(args, sample: Sample, sampling_params, evaluation) -> Sample:
                     #     f"[CACHE MISS] Created cache for group_index={group_index}, mode={mode}, total_samples={n_samples_per_prompt}{eval_tag}"
                     # )
 
+    if sopo_steps and not evaluation:
+        sample.metadata["sopo_state_selection"] = {
+            "messages": copy.deepcopy(input_messages), "mode": mode,
+            "parent": program_snapshot(parent_program),
+            "secondary": program_snapshot(secondary_parent_program),
+        }
     augmented_system_prompt = input_messages[system_index]["content"]
     augmented_user_prompt = input_messages[user_index]["content"]
     input_messages[system_index]["content"] = augmented_system_prompt
@@ -1904,6 +1927,24 @@ async def reward_func(args, sample, **kwargs):
             sample.metadata["generation_abort_reason"] = "group_generation_aborted"
             return _return_generation_abort_for_retry(sample, task_name=task_name, group_index=group_index)
 
+    sample.metadata["sopo_node"] = {
+        "score": score, "code": code, "response": raw_text,
+        "status_code": status_code, "code_category": code_category,
+        # Sandbox feedback is shown to the next Improve/Debug operator, exactly as in RL parent prompts.
+        "payload": copy.deepcopy(payload) if isinstance(payload, dict) else {},
+        "static_value": float(sample.metadata.get("static_base_reward_effective") or 0.0),
+        "eligible": code_category == "valid" and status_code == 200 and _is_finite_number(score),
+    }
+    if sample.metadata.get("sopo_continuation"):
+        return final_reward
+    if not evaluation:
+        from sopo import extend_reward
+        final_reward = await extend_reward(args, sample, final_reward)
+        sample.metadata["final_reward"] = final_reward
+        if os.getenv("SOPO_CURRICULUM", "1") == "1" and "sopo_trajectory" in sample.metadata:
+            from sopo_bandit import bandit
+            bandit.observe(sample, final_reward)
+
     task_reward_frontier = _compute_task_reward_frontier(db=await get_program_database(), task_name=task_name, metadata_fallback=sample.metadata)
     sample.metadata["task_best_dynamic_raw_reward_before"] = task_reward_frontier["best_dynamic_raw_reward_before"]
     sample.metadata["task_best_static_raw_reward_before"] = task_reward_frontier["best_static_raw_reward_before"]
@@ -1948,7 +1989,9 @@ async def reward_func(args, sample, **kwargs):
         code=code,
         score=score,
         running_time=running_time,
-        reward=final_reward,  # Training reward (includes improve bonus when applicable)
+        # Database reward describes this program itself. SOPO lookahead descendants are not
+        # stored, so their credit must not change parent selection (improve vs debug pools).
+        reward=sample.metadata.get("sopo_immediate_reward", final_reward),
         base_reward=shaped_base_reward,  # Original reward before extra improve/debug/crossover bonus
         parent_id=parent_id,
         parent_code=parent_code,

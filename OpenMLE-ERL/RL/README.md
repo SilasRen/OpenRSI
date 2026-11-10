@@ -46,3 +46,11 @@ Read [`docs/usage.md`](docs/usage.md) before configuring or launching training. 
 The released single-node asynchronous profile completed real checkpoint restore, two rollout-and-optimizer steps, post-step weight synchronization to SGLang, and evaluation on eight H200 GPUs. This validates the released path end to end; it is not a claim of exact paper reproduction.
 
 Original OpenMLE material follows the repository-level [CC BY-NC 4.0 license](../../LICENSE). Dependencies retain their upstream terms.
+
+## Small-model feasibility pilot
+
+Before a full RL run, use the [frozen-model pilot](docs/pilot.md) to collect
+three-step paths, independently repeat continuations, and measure curriculum
+variance repeatability. The default discovery budget is 48 evaluations for two
+states; all three collection phases together use up to 192. No optimizer or
+SLIME runtime is needed for this pilot.
