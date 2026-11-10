@@ -1,4 +1,9 @@
-"""Fixed-budget lookahead credit; only the original response is optimized."""
+"""SOPO: fixed-budget lookahead credit for every sibling; only the root response is optimized.
+
+Each of the 16 siblings is continued along its own branch for SOPO_STEPS more operator
+calls (Improve if it runs, Debug if it crashed) and its reward becomes the credit of
+that branch. SOPO_STEPS=0 (or credit mode with SOPO_LAMBDA=0) recovers the original reward.
+"""
 import copy
 import math
 import os
@@ -29,30 +34,68 @@ def lookahead_bonus(nodes, decay):
     return bonus
 
 
+def node_program(node, task_name=""):
+    """Wrap a lookahead node as the parent Program shown to the real operator prompt."""
+    from program_database import Program
+    return Program(task_name=task_name, status_code=node.get("status_code") or 0,
+                   payload=copy.deepcopy(node.get("payload") or {}), code=node.get("code") or "",
+                   score=node.get("score"))
+
+
+def continuation_messages(source, public_prompt, node):
+    """Build the same Improve/Debug operator prompt that RL and search use."""
+    from prompt_builder import build_prompt
+    system = next(m["content"] for m in public_prompt if m["role"] == "system")
+    user = next(m["content"] for m in public_prompt if m["role"] == "user")
+    mode = "improve" if node["eligible"] else "debug"
+    system_prompt, user_prompt = build_prompt(
+        mode=mode,
+        task_description=source.get("task_description") or "",
+        data_description=source.get("data_description") or "",
+        public_system_prompt=system,
+        public_user_prompt=user,
+        virtual_data_dir=source.get("data_dir") or "",
+        parent_program=node_program(node, source.get("task_name") or ""),
+    )
+    return mode, [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+
+
+def combine_reward(nodes, immediate_reward, mode, decay):
+    """Return (training_reward, bonus) for a root and its fixed-budget lookahead."""
+    bonus = lookahead_bonus(nodes, decay)
+    eligible = [float(node["static_value"]) for node in nodes if node["eligible"]]
+    if mode == "best":
+        # Simple version: credit = best value reached from this root.
+        return (max(eligible) if eligible else float(immediate_reward)), bonus
+    return float(immediate_reward) + bonus, bonus
+
+
 async def extend_reward(args, sample, immediate_reward):
     steps, decay = settings()
     if not steps or sample.metadata.get("generation_aborted") or sample.metadata.get("group_generation_aborted"):
         return immediate_reward
+    mode = os.getenv("SOPO_REWARD_MODE", "best")
+    root = copy.deepcopy(sample.metadata["sopo_node"])
+    nodes = [root]
+    sample.metadata.update(sopo_reward_mode=mode, sopo_steps=steps, sopo_lambda=decay,
+                           sopo_immediate_reward=immediate_reward)
+    if root.get("code_category") != "valid":
+        # Empty / hacked / unverifiable roots keep their penalty and cannot launder
+        # it through descendants, so spending lookahead budget on them is wasted.
+        sample.metadata.update(sopo_trajectory=_compact(nodes), sopo_bonus=0.0, sopo_lookahead_skipped=True)
+        return immediate_reward
+
     # Import lazily: generate_mle invokes this after the first sandbox evaluation.
     from generate_mle import GenerateState, Sample, post, reward_func
 
     source = sample.metadata["sopo_source_metadata"]
     params = sample.metadata["sopo_sampling_params"]
-    nodes = [copy.deepcopy(sample.metadata["sopo_node"])]
     state = GenerateState(args)
-    initial_messages = sample.metadata.get("sopo_initial_messages", sample.prompt)
-    system = next(m["content"] for m in initial_messages if m["role"] == "system")
-    task = next(m["content"] for m in initial_messages if m["role"] == "user")
     for depth in range(1, steps + 1):
         parent = nodes[-1]
-        # Each branch follows its own immediate predecessor, including regressions.
-        # Only public task text and generated code are shown, never held-out scores.
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": task + "\n\nImprove the following candidate program. "
-             "Repair errors if necessary. Return a complete runnable program in a Python code block. "
-             "Follow all original task and validation requirements.\n\n" + parent["response"]},
-        ]
+        # Each branch follows its own immediate predecessor, including regressions:
+        # runnable nodes get the Improve operator, crashed nodes get Debug.
+        op_mode, messages = continuation_messages(source, sample.prompt, parent)
         async with state.semaphore:
             output = await post(
                 f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate",
@@ -66,23 +109,22 @@ async def extend_reward(args, sample, immediate_reward):
         for key in list(metadata):
             if key.startswith(("parent_", "crossover_", "reward_group_", "sopo_")):
                 metadata.pop(key)
-        metadata.update(sopo_continuation=True, evaluation=False, generation_mode="improve",
+        metadata.update(sopo_continuation=True, evaluation=False, generation_mode=op_mode,
                         task_id=sample.metadata["task_id"], parent_code=parent["code"])
         child = Sample(prompt=messages, response=output["text"], metadata=metadata)
         await reward_func(args, child)
-        nodes.append(copy.deepcopy(child.metadata["sopo_node"]))
-    # Hacked/invalid roots cannot launder their penalty through descendants.
-    bonus = lookahead_bonus(nodes, decay) if nodes[0]["eligible"] else 0.0
-    mode = os.getenv("SOPO_REWARD_MODE", "best")
-    if not nodes[0]["eligible"]:
-        reward = float(immediate_reward)
-    elif mode == "best":
-        reward = max(float(node["static_value"]) for node in nodes if node["eligible"])
-    else:
-        reward = float(immediate_reward) + bonus
-    sample.metadata.update(sopo_reward_mode=mode, sopo_trajectory=nodes, sopo_steps=steps, sopo_lambda=decay,
-                           sopo_immediate_reward=immediate_reward, sopo_bonus=bonus)
+        child_node = copy.deepcopy(child.metadata["sopo_node"])
+        child_node["operator"] = op_mode
+        nodes.append(child_node)
+    reward, bonus = combine_reward(nodes, immediate_reward, mode, decay)
+    sample.metadata.update(sopo_trajectory=_compact(nodes), sopo_bonus=bonus)
+    sample.metadata["sopo_node"].pop("payload", None)
     return reward
+
+
+def _compact(nodes):
+    """Sandbox payloads are only needed to prompt the next step; keep stored metadata small."""
+    return [{k: v for k, v in node.items() if k != "payload"} for node in nodes]
 
 
 def program_snapshot(program):

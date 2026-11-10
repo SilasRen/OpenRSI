@@ -6,8 +6,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sopo_bandit import StateBandit
 
 
-def sample(task, gid, member):
+def sample(task, gid, member, eligible=True):
     return SimpleNamespace(prompt=[{'role':'user','content':task}], metadata=dict(
+        sopo_trajectory=[{'eligible': eligible}],
         task_id=task, reward_group_id=gid, reward_group_expected_count=2,
         reward_group_member_index=member, sopo_source_metadata={'uuid':task},
         sopo_state_selection={'mode':'draft','messages':[{'role':'user','content':task}], 'parent':None,'secondary':None}))
@@ -41,5 +42,14 @@ class BanditTests(unittest.TestCase):
     def test_mixed_states_rejected(self):
         b=StateBandit(); b.observe(sample('a','g',0),0)
         with self.assertRaises(ValueError): b.observe(sample('b','g',1),1)
+
+    def test_crash_penalties_do_not_count_as_useful_spread(self):
+        b=StateBandit()
+        # Half crash (-0.5), half run at the same 0.8: only "don't crash" is learnable.
+        for i, (v, ok) in enumerate([(-.5, False), (.8, True), (-.5, False), (.8, True)]):
+            m = sample('crashy', 'g', i, ok); m.metadata['reward_group_expected_count'] = 4
+            b.observe(m, v)
+        self.assertEqual(next(iter(b.arms.values()))['priority'], 0)
+        self.assertIsNone(b.draw(exploration=1e-9))
 
 if __name__=='__main__': unittest.main()

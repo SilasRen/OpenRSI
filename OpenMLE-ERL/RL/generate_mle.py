@@ -1197,10 +1197,6 @@ async def generate(args, sample: Sample, sampling_params, evaluation) -> Sample:
         }
     augmented_system_prompt = input_messages[system_index]["content"]
     augmented_user_prompt = input_messages[user_index]["content"]
-    if sopo_steps and not evaluation:
-        # Continue from the exact prompt seen by the root response, including
-        # OpenRSI's selected parent context, without changing the root tokens.
-        sample.metadata["sopo_initial_messages"] = copy.deepcopy(input_messages)
     input_messages[system_index]["content"] = augmented_system_prompt
     input_messages[user_index]["content"] = augmented_user_prompt
 
@@ -1934,6 +1930,8 @@ async def reward_func(args, sample, **kwargs):
     sample.metadata["sopo_node"] = {
         "score": score, "code": code, "response": raw_text,
         "status_code": status_code, "code_category": code_category,
+        # Sandbox feedback is shown to the next Improve/Debug operator, exactly as in RL parent prompts.
+        "payload": copy.deepcopy(payload) if isinstance(payload, dict) else {},
         "static_value": float(sample.metadata.get("static_base_reward_effective") or 0.0),
         "eligible": code_category == "valid" and status_code == 200 and _is_finite_number(score),
     }
@@ -1991,7 +1989,9 @@ async def reward_func(args, sample, **kwargs):
         code=code,
         score=score,
         running_time=running_time,
-        reward=final_reward,  # Training reward (includes improve bonus when applicable)
+        # Database reward describes this program itself. SOPO lookahead descendants are not
+        # stored, so their credit must not change parent selection (improve vs debug pools).
+        reward=sample.metadata.get("sopo_immediate_reward", final_reward),
         base_reward=shaped_base_reward,  # Original reward before extra improve/debug/crossover bonus
         parent_id=parent_id,
         parent_code=parent_code,
