@@ -5,3 +5,7 @@ numpy
 pandas
 scikit-learn>=1.3
 matplotlib  # optional: search_curves.png
+
+# Old clusters (CentOS 7 / glibc 2.17, gcc < 9.3): pip cannot install recent numpy/torch wheels.
+#   conda install -y "numpy<2.3" pandas scikit-learn matplotlib
+#   pip install "torch==2.6.0" "transformers>=4.45,<5"
