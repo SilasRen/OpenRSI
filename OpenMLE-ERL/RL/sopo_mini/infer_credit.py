@@ -170,6 +170,7 @@ def collect_chunk(policy, executor, states, args):
                 "category": node.result.category, "status": node.result.status,
                 "utility": node.utility, "eligible": node.result.eligible,
                 "r0": immediate_reward(op, node.result, parent),
+                "log_tail": node.result.log[-400:] if node.result.status != "ok" else "",
                 "discovery": discovery[idx],
                 "repeats": [rep[idx] for rep in repeats],
             })
