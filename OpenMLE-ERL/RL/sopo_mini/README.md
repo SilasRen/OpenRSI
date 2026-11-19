@@ -76,6 +76,26 @@ CPU：执行器并行数 = CPU 数 / 同时运行的任务数，建议节点 ≥
 
 训练过程看 `$OUT/train/<arm>_s<seed>/train_log.jsonl`（每步的 valid 率、奖励、执行次数）和 `$OUT/logs/`。
 
+## 只推理：多步奖励是不是更好的 GSPO 信号（不训练）
+
+`infer_credit.py` 不做任何参数更新，用冻结模型回答一个问题：同一组兄弟里，原来 GSPO 用的单步奖励，
+和看后面 K 步的多步奖励（`best`，以及 `credit` 的 λ^k 折扣），哪个给出的组内优势更接近兄弟“作为搜索起点的真实价值”。
+
+每个状态（任务 + Draft/Improve/Debug + 父程序）：采样 G 个兄弟并执行（单步奖励 r0）；每个能跑的兄弟沿自己的分支续写 K 步
+算多步奖励；再**独立地**续写 R 次，取每次分支最好成绩的平均作为真实价值 V（和算奖励的那次续写互不共享样本）。
+
+```bash
+# 自检（无 GPU，几分钟）
+python infer_credit.py --fake-policy --tasks $OUT/tasks --out $OUT/infer_fake --num-states 8
+# 真模型，1 张卡
+python infer_credit.py --model /path/Qwen2.5-Coder-0.5B-Instruct --tasks $OUT/tasks --out $OUT/infer_05b \
+  --num-states 24 --group-size 8 --steps 2 --repeats 2
+```
+
+输出 `report.md`、`summary.json`、`credit_signal.png`，`records.jsonl` 支持断点续跑（`--report-only` 只重算报告）。
+主要看 `Spearman(reward, V)` 和成对准确率：多步信号比 `single` 高、且 “minus single” 的置信区间在 0 以上，才说明它是更好的训练信号。
+`credit` 奖励按定义不会低于单步奖励，所以“reward > single”的比例本身不是证据。
+
 ## 注意
 
 - 隔离弱于 Docker：模型生成的代码以当前用户在本地子进程执行，靠静态黑名单 + rlimit + 临时目录。

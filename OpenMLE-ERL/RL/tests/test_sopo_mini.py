@@ -76,5 +76,25 @@ class SopoMiniTests(unittest.TestCase):
         self.assertIn("sopo", summary["vs_baseline"])
 
 
+    def test_infer_credit_stats_and_fake_run(self):
+        import infer_credit as ic
+        self.assertAlmostEqual(ic.spearman([1, 2, 3], [3, 4, 9]), 1.0)
+        self.assertIsNone(ic.spearman([1, 1, 1], [1, 2, 3]))
+        self.assertEqual(ic.pair_accuracy([1.0, 0.0], [0.9, 0.1], 0.05), (1.0, 1))
+        sib = {"r0": 0.5, "category": "valid", "utility": 0.5, "eligible": True,
+               "discovery": [{"static_value": 0.5, "eligible": True}, {"static_value": 0.4, "eligible": True},
+                             {"static_value": 0.9, "eligible": True}], "repeats": []}
+        sig = ic.signals(sib, None, 2, [0.5])
+        self.assertAlmostEqual(sig["best_K2"], 0.9)
+        self.assertAlmostEqual(sig["best_K1"], 0.5)
+        self.assertAlmostEqual(sig["credit_K2_l0.5"], 0.5 + 0.25 * 0.4)
+        with tempfile.TemporaryDirectory() as d:
+            ic.main(["--fake-policy", "--tasks", str(self.root), "--out", d, "--num-states", "2",
+                     "--group-size", "3", "--repeats", "1", "--seed-drafts", "1", "--workers", "2"])
+            summary = json.loads((Path(d) / "summary.json").read_text())
+            self.assertIn("best_K2", summary["signals"])
+            self.assertEqual(summary["groups_total"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()
