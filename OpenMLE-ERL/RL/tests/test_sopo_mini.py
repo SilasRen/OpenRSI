@@ -92,8 +92,8 @@ class SopoMiniTests(unittest.TestCase):
             ic.main(["--fake-policy", "--tasks", str(self.root), "--out", d, "--num-states", "2",
                      "--group-size", "3", "--repeats", "1", "--seed-drafts", "1", "--workers", "2"])
             summary = json.loads((Path(d) / "summary.json").read_text())
-            self.assertIn("best_K2", summary["signals"])
-            self.assertEqual(summary["groups_total"], 2)
+            self.assertIn("best_K2", summary["future"]["signals"])
+            self.assertEqual(summary["future"]["groups_total"], 2)
 
 
 if __name__ == "__main__":

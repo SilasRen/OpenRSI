@@ -199,7 +199,17 @@ def signals(sib, op_parent_reward_fn, K, lams):
     return out
 
 
-def analyse(records, args):
+def sibling_value(sib, future_only):
+    """V: mean best utility over the independent continuations.
+
+    future_only=True drops the root itself, so V measures only how far the branch can go *after* this sibling,
+    i.e. how good a search starting point it is. With the root included, V shares the root's own score with the
+    single-step reward, which mechanically favours `single`."""
+    chains = sib["repeats"] or [sib["discovery"]]
+    return statistics.fmean(branch_best(ch[1:] if future_only else ch) for ch in chains)
+
+
+def analyse(records, args, future_only=True):
     rng = random.Random(args.seed + 7)
     lams = [float(x) for x in args.lams.split(",")]
     names = None
@@ -219,8 +229,7 @@ def analyse(records, args):
         if len(runnable) < 2:
             continue
         n_groups += 1
-        value = [statistics.fmean(branch_best(ch) for ch in sibs[i]["repeats"]) if sibs[i]["repeats"]
-                 else branch_best(sibs[i]["discovery"]) for i in runnable]
+        value = [sibling_value(sibs[i], future_only) for i in runnable]
         single_adv = advantages([sig[i]["single"] for i in range(len(sibs))])
         single_top = max(range(len(sibs)), key=lambda i: (single_adv[i], -i))
         for n in names:
@@ -238,7 +247,7 @@ def analyse(records, args):
             top = max(range(len(sibs)), key=lambda i: (adv[i], -i))
             top_change[n][0] += top != single_top
             top_change[n][1] += 1
-    summary = {"groups_used": n_groups, "groups_total": len(records), "signals": {}}
+    summary = {"v_future_only": future_only, "groups_used": n_groups, "groups_total": len(records), "signals": {}}
     base_top1 = per_signal["single"]["top1"] if per_signal else []
     for n in names or []:
         p = per_signal[n]
@@ -274,15 +283,8 @@ def _fmt(x, d=3):
     return "n/a" if x is None else f"{x:.{d}f}"
 
 
-def report(summary, records, out, args):
-    lines = ["# Multi-step vs single-step reward (inference only)", "",
-             f"States: {summary['groups_total']} (groups with >= 2 runnable siblings: {summary['groups_used']}), "
-             f"G={args.group_size}, K={args.steps}, independent repeats R={args.repeats}.",
-             f"Root runnable rate {_fmt(summary['root_runnable_rate'], 2)}, scored rate "
-             f"{_fmt(summary['root_scored_rate'], 2)}; lookahead found a better program than the root for "
-             f"{_fmt(summary['lookahead_improved_rate'], 2)} of runnable roots.", "",
-             "V = mean best utility over R independent K-step continuations of the sibling.", "",
-             "| signal | Spearman(reward, V) [95% CI] | minus single [95% CI] | pairwise acc | top-1 V | "
+def _table(summary):
+    lines = ["| signal | Spearman(reward, V) [95% CI] | minus single [95% CI] | pairwise acc | top-1 V | "
              "top-1 V minus single [95% CI] | reward > single | top-1 changed |",
              "|---|---|---|---|---|---|---|---|"]
     for n, s in summary["signals"].items():
@@ -293,6 +295,40 @@ def report(summary, records, out, args):
             f"{_fmt(d[0])} [{_fmt(d[1])}, {_fmt(d[2])}] | {_fmt(s['pair_accuracy'])} ({s['pairs']}) | "
             f"{_fmt(s['top1_value'])} | {_fmt(t[0])} [{_fmt(t[1])}, {_fmt(t[2])}] | "
             f"{_fmt(s['frac_reward_gt_single'], 2)} | {_fmt(s['frac_top1_changed'], 2)} |")
+    return lines
+
+
+def failure_counts(records, top=10):
+    import collections
+    c = collections.Counter()
+    for r in records:
+        for s in r["siblings"]:
+            tail = (s.get("log_tail") or "").strip().splitlines()
+            if tail:
+                c[tail[-1][:100]] += 1
+    return c.most_common(top)
+
+
+def report(summary, records, out, args):
+    with_root = summary["with_root"]
+    summary = summary["future"]
+    lines = ["# Multi-step vs single-step reward (inference only)", "",
+             f"States: {summary['groups_total']} (groups with >= 2 runnable siblings: {summary['groups_used']}), "
+             f"G={args.group_size}, K={args.steps}, independent repeats R={args.repeats}.",
+             f"Root runnable rate {_fmt(summary['root_runnable_rate'], 2)}, scored rate "
+             f"{_fmt(summary['root_scored_rate'], 2)}; lookahead found a better program than the root for "
+             f"{_fmt(summary['lookahead_improved_rate'], 2)} of runnable roots.", "",
+             "## Main: V = future potential (root excluded)", "",
+             "V = mean over R independent K-step continuations of the best utility reached *after* the sibling. "
+             "This is how good a search starting point the sibling is, which is what the multi-step reward claims "
+             "to measure.", ""]
+    lines += _table(summary)
+    lines += ["", "## Secondary: V includes the root's own utility", "",
+              "Shares the root score with the single-step reward, so it mechanically favours `single`.", ""]
+    lines += _table(with_root)
+    fails = failure_counts(records)
+    if fails:
+        lines += ["", "## Most common failures of root programs", ""] + [f"- {n} x `{m}`" for m, n in fails]
     lines += ["", "How to read it:",
               "- A multi-step signal is a better GSPO training signal if its Spearman and pairwise accuracy "
               "against V are higher than `single`, with the 'minus single' CI above 0.",
@@ -301,7 +337,7 @@ def report(summary, records, out, args):
               "- The frozen model is both the operator and the continuation policy; this measures signal quality "
               "at the start of training, not the effect of training."]
     (out / "report.md").write_text("\n".join(lines) + "\n")
-    (out / "summary.json").write_text(json.dumps(summary, indent=1))
+    (out / "summary.json").write_text(json.dumps({"future": summary, "with_root": with_root}, indent=1))
     try:
         plot(summary, records, out, args)
     except Exception as e:  # plotting must never lose the numbers
@@ -346,17 +382,15 @@ def plot(summary, records, out, args):
         for s in rec["siblings"]:
             if s["category"] != "valid":
                 continue
-            v = statistics.fmean(branch_best(ch) for ch in s["repeats"]) if s["repeats"] else None
-            if v is None:
-                continue
+            v = sibling_value(s, True)
             xs.append(s["r0"])
             ys.append(v)
     ax.scatter(xs, ys, s=10, alpha=0.5, color="#8a8f98", label="single-step r0")
     xs2 = [signals(s, None, args.steps, [])[key] for rec in records for s in rec["siblings"]
-           if s["category"] == "valid" and s["repeats"]]
+           if s["category"] == "valid"]
     ax.scatter(xs2, ys, s=10, alpha=0.5, color="#2a7de1", label=f"{key}")
     ax.set_xlabel("reward used by GSPO")
-    ax.set_ylabel("V (independent future best)")
+    ax.set_ylabel("V (best utility reached after the sibling)")
     ax.set_title("(c) Per-sibling reward vs future value")
     ax.legend(fontsize=8)
     fig.suptitle("Frozen-model inference: does lookahead reward rank siblings closer to their real search value?",
@@ -377,14 +411,14 @@ def main(argv=None):
     ap.add_argument("--num-states", type=int, default=24)
     ap.add_argument("--group-size", type=int, default=8)
     ap.add_argument("--steps", type=int, default=2, help="lookahead depth K")
-    ap.add_argument("--repeats", type=int, default=2, help="independent continuations for ground truth V")
+    ap.add_argument("--repeats", type=int, default=4, help="independent continuations for ground truth V")
     ap.add_argument("--lams", default="0.5,0.9,1.0", help="lambda values for credit mode")
     ap.add_argument("--seed-drafts", type=int, default=4, help="drafts per task to seed Improve/Debug parents")
     ap.add_argument("--op-probs", default="draft=0.34,improve=0.33,debug=0.33")
     ap.add_argument("--chunk", type=int, default=4, help="states per generation batch (resume granularity)")
     ap.add_argument("--max-new-tokens", type=int, default=1024)
     ap.add_argument("--temperature", type=float, default=1.0)
-    ap.add_argument("--timeout", type=float, default=90)
+    ap.add_argument("--timeout", type=float, default=300)
     ap.add_argument("--mem-gb", type=float, default=6)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--gen-batch", type=int, default=32)
@@ -427,7 +461,7 @@ def main(argv=None):
                 records += chunk
                 print(f"[{len(records)}/{len(states)} states] executions={executor.calls} "
                       f"t={time.time() - t0:.0f}s", flush=True)
-    summary = analyse(records, args)
+    summary = {"future": analyse(records, args, True), "with_root": analyse(records, args, False)}
     report(summary, records, out, args)
     print((out / "report.md").read_text())
 
