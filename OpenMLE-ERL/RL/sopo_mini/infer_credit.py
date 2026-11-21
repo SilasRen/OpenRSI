@@ -131,12 +131,32 @@ def build_states(policy, executor, tasks, args, rng, out):
         for g in row:
             db.add(tasks[i].name, "draft", results[k].code, g.text, results[k], None)
             k += 1
-    probs = {kk: float(v) for kk, v in (kv.split("=") for kv in args.op_probs.split(","))}
+    if args.seed_scripted:
+        # Simple fixed baselines (e.g. a linear model) give mid-quality parents with real headroom for Improve.
+        from policy import _FAKE
+        kinds = [x for x in args.seed_scripted.split(",") if x]
+        sjobs = [(_FAKE[kind], t) for t in tasks for kind in kinds]
+        sres = executor.run_many(sjobs)
+        for (code, t), res, kind in zip(sjobs, sres, [kd for _ in tasks for kd in kinds]):
+            db.add(t.name, "draft", code, f"SCRIPTED:{kind}\n```python\n{code}```", res, None)
     states = []
-    for s in range(args.num_states):
-        task = tasks[s % len(tasks)]
-        op, parent = db.select(task.name, probs)
-        states.append((task, op, parent))
+    if args.improve_only:
+        lo, hi = (float(x) for x in args.parent_range.split(","))
+        pool = {t.name: [n for n in db.programs(t.name) if n.result.eligible and lo <= n.utility <= hi]
+                for t in tasks}
+        usable = [t for t in tasks if pool[t.name]]
+        if not usable:
+            raise SystemExit(f"no scored parent with utility in [{lo}, {hi}]; widen --parent-range")
+        for s in range(args.num_states):
+            task = usable[s % len(usable)]
+            states.append((task, "improve", rng.choice(pool[task.name])))
+        print(f"improve-only: {len(usable)}/{len(tasks)} tasks have parents in [{lo}, {hi}]", flush=True)
+    else:
+        probs = {kk: float(v) for kk, v in (kv.split("=") for kv in args.op_probs.split(","))}
+        for s in range(args.num_states):
+            task = tasks[s % len(tasks)]
+            op, parent = db.select(task.name, probs)
+            states.append((task, op, parent))
     path.write_bytes(pickle.dumps(states))
     seeded = sum(r.eligible for r in results)
     print(f"seeded {len(results)} drafts ({seeded} scored); {len(states)} states: "
@@ -175,7 +195,9 @@ def collect_chunk(policy, executor, states, args):
                 "repeats": [rep[idx] for rep in repeats],
             })
         records.append({"task": task.name, "op": op,
-                        "parent_utility": parent.utility if parent else None, "siblings": sib})
+                        "parent_utility": parent.utility if parent else None,
+                        "parent_scripted": bool(parent and parent.response.startswith("SCRIPTED:")),
+                        "siblings": sib})
     return records
 
 
@@ -279,6 +301,49 @@ def analyse(records, args, future_only=True):
     return summary
 
 
+def late_bloomers(records, ops=("improve",)):
+    """Delayed-reward cases: a sibling that is NOT the group's single-step best, whose own branch later beats
+    the group's best single-step utility.
+
+    pure: every node on the branch (root + continuations) ran and scored, i.e. Improve on top of Improve,
+    not a crash repaired by Debug. confirmed: in the independent continuations the late bloomer's future value
+    is higher than that of the single-step best sibling (it was not just a lucky discovery chain)."""
+    def u(n):
+        return n["static_value"] if n["eligible"] else 0.0
+    out = {"groups": 0, "candidates": 0, "late_any": 0, "late_pure": 0, "confirmed_any": 0, "confirmed_pure": 0,
+           "pure_chains": 0, "examples": []}
+    for rec in records:
+        if rec["op"] not in ops:
+            continue
+        sibs = [s for s in rec["siblings"] if s["category"] == "valid"]
+        if len(sibs) < 2:
+            continue
+        out["groups"] += 1
+        u0 = [s["utility"] if s["eligible"] else 0.0 for s in sibs]
+        best0 = max(u0)
+        top = u0.index(best0)
+        for i, s in enumerate(sibs):
+            if u0[i] >= best0 - 1e-9:
+                continue
+            out["candidates"] += 1
+            chain = s["discovery"]
+            pure = all(n["eligible"] for n in chain) and len(chain) > 1
+            out["pure_chains"] += pure
+            if max(u(n) for n in chain) <= best0 + 1e-9:
+                continue
+            ok = sibling_value(s, True) > sibling_value(sibs[top], True) + 1e-9
+            out["late_any"] += 1
+            out["confirmed_any"] += ok
+            if pure:
+                out["late_pure"] += 1
+                out["confirmed_pure"] += ok
+            if len(out["examples"]) < 8:
+                out["examples"].append({"task": rec["task"], "parent": rec["parent_utility"],
+                                        "chain": [round(u(n), 3) for n in chain], "group_single_best": best0,
+                                        "pure": pure, "confirmed": ok})
+    return out
+
+
 def _fmt(x, d=3):
     return "n/a" if x is None else f"{x:.{d}f}"
 
@@ -326,6 +391,19 @@ def report(summary, records, out, args):
     lines += ["", "## Secondary: V includes the root's own utility", "",
               "Shares the root score with the single-step reward, so it mechanically favours `single`.", ""]
     lines += _table(with_root)
+    lb = summary.get("late_bloomers")
+    if lb and lb["groups"]:
+        c = max(1, lb["candidates"])
+        lines += ["", "## Delayed reward in Improve states (late bloomers)", "",
+                  f"Improve groups: {lb['groups']}; siblings that were not the single-step best: {lb['candidates']} "
+                  f"(of which {lb['pure_chains']} have an all-scored continuation chain).",
+                  f"- Overtook the group's single-step best later (any chain): {lb['late_any']} ({lb['late_any'] / c:.1%}); "
+                  f"confirmed by independent continuations: {lb['confirmed_any']}",
+                  f"- Same, pure Improve-on-Improve chains only: {lb['late_pure']} ({lb['late_pure'] / c:.1%}); "
+                  f"confirmed: {lb['confirmed_pure']}", ""]
+        for e in lb["examples"]:
+            lines.append(f"  - {e['task']} parent={_fmt(e['parent'], 2)} chain={e['chain']} "
+                         f"single-best={_fmt(e['group_single_best'], 2)} pure={e['pure']} confirmed={e['confirmed']}")
     fails = failure_counts(records)
     if fails:
         lines += ["", "## Most common failures of root programs", ""] + [f"- {n} x `{m}`" for m, n in fails]
@@ -415,6 +493,11 @@ def main(argv=None):
     ap.add_argument("--lams", default="0.5,0.9,1.0", help="lambda values for credit mode")
     ap.add_argument("--seed-drafts", type=int, default=4, help="drafts per task to seed Improve/Debug parents")
     ap.add_argument("--op-probs", default="draft=0.34,improve=0.33,debug=0.33")
+    ap.add_argument("--improve-only", action="store_true",
+                    help="every state is Improve on a scored parent whose utility lies in --parent-range")
+    ap.add_argument("--parent-range", default="0.2,0.8")
+    ap.add_argument("--seed-scripted", default="",
+                    help="also seed these fixed programs as candidate parents, e.g. 'linear,constant'")
     ap.add_argument("--chunk", type=int, default=4, help="states per generation batch (resume granularity)")
     ap.add_argument("--max-new-tokens", type=int, default=1024)
     ap.add_argument("--temperature", type=float, default=1.0)
@@ -462,6 +545,7 @@ def main(argv=None):
                 print(f"[{len(records)}/{len(states)} states] executions={executor.calls} "
                       f"t={time.time() - t0:.0f}s", flush=True)
     summary = {"future": analyse(records, args, True), "with_root": analyse(records, args, False)}
+    summary["future"]["late_bloomers"] = late_bloomers(records)
     report(summary, records, out, args)
     print((out / "report.md").read_text())
 
