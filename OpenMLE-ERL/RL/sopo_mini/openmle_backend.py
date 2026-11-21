@@ -401,7 +401,9 @@ class LocalSandbox:
 
 def _chat(url, model, messages, n=1, max_tokens=1024, temperature=0.0, timeout=3600, seed=None):
     import httpx
-    body = dict(model=model, messages=messages, n=n, max_tokens=max_tokens, temperature=temperature)
+    body = dict(model=model, messages=messages, max_tokens=max_tokens, temperature=temperature)
+    if n != 1:
+        body["n"] = n
     if seed is not None:
         body["seed"] = seed
     for attempt in range(5):
@@ -455,13 +457,16 @@ class OpenAIPolicy:
         self.calls = 0
 
     def generate(self, prompts, n, max_new_tokens, temperature=1.0, top_p=1.0):
-        def one(i, msgs):
-            ch = _chat(self.url, self.model, msgs, n=n, max_tokens=max_new_tokens, temperature=temperature,
-                       seed=self.seed * 1000003 + self.calls * 7919 + i)
-            return [Gen(c["message"].get("content") or "") for c in ch]
-        futs = [self.pool.submit(one, i, m) for i, m in enumerate(prompts)]
+        """One request per sample (n=1), so servers without `n` support (llama.cpp) work too."""
+        base = self.seed * 1000003 + self.calls * 7919
         self.calls += 1
-        return [f.result() for f in futs]
+
+        def one(i, j, msgs):
+            ch = _chat(self.url, self.model, msgs, n=1, max_tokens=max_new_tokens, temperature=temperature,
+                       seed=(base + i * 131 + j) % (2 ** 31))
+            return Gen(ch[0]["message"].get("content") or "")
+        futs = [[self.pool.submit(one, i, j, m) for j in range(n)] for i, m in enumerate(prompts)]
+        return [[f.result() for f in row] for row in futs]
 
 
 def extract(text: str) -> str:
