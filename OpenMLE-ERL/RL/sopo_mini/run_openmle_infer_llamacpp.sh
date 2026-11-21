@@ -17,6 +17,7 @@ SLOT_CTX=${SLOT_CTX:-32768}
 EXTRA=${EXTRA:-}
 
 export LD_LIBRARY_PATH=$BUILD_ENV/lib:${LD_LIBRARY_PATH:-}
+export no_proxy=127.0.0.1,localhost${no_proxy:+,$no_proxy} NO_PROXY=127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}  # local server must bypass the cluster proxy
 cd "${SOPO_DIR:-$W/sopo_rl/sopo_mini}"
 mkdir -p "$OUT"
 PIDS=()
