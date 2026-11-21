@@ -141,6 +141,8 @@ def build_states(policy, executor, tasks, args, rng, out):
         sres = executor.run_many(sjobs)
         for (code, t), res, kind in zip(sjobs, sres, [kd for _ in tasks for kd in kinds]):
             db.add(t.name, "draft", code, f"SCRIPTED:{kind}\n```python\n{code}```", res, None)
+    if hasattr(executor, "freeze_scales"):
+        executor.freeze_scales(db, tasks)
     states = []
     if args.improve_only:
         lo, hi = (float(x) for x in args.parent_range.split(","))
@@ -205,7 +207,11 @@ def collect_chunk(policy, executor, states, args):
                 "discovery": discovery[idx],
                 "repeats": [rep[idx] for rep in repeats],
             })
+        meta = getattr(task, "metadata", None) or {}
         records.append({"task": task.name, "op": op,
+                        "parent_score": parent.result.score if parent else None,
+                        "higher_is_better": meta.get("higher_is_better", True),
+                        "static_bounds": bool(meta) and __import__("openmle_backend").has_static_bounds(meta),
                         "parent_utility": parent.utility if parent else None,
                         "parent_scripted": bool(parent and parent.response.startswith("SCRIPTED:")),
                         "siblings": sib})
@@ -526,8 +532,8 @@ def main(argv=None):
     g.add_argument("--task-names", default="", help="comma list to restrict the packages")
     g.add_argument("--max-tasks", type=int, default=0)
     g.add_argument("--allow-gpu-tasks", action="store_true")
-    g.add_argument("--allow-missing-bounds", action="store_true",
-                   help="keep tasks without leaderboard/theoretical bounds (static utility then uses +-100)")
+    g.add_argument("--require-bounds", action="store_true",
+                   help="only tasks with leaderboard/theoretical bounds (released packages mostly have none)")
     g.add_argument("--model-url", default="http://127.0.0.1:8000/v1", help="OpenAI-compatible server (vLLM)")
     g.add_argument("--model-name", default="Frontis-MA1-30B", help="served model name")
     g.add_argument("--concurrency", type=int, default=32, help="parallel model requests")
@@ -561,7 +567,7 @@ def main(argv=None):
             import train as train_mod
             tasks = ob.load_openmle_tasks(
                 args.openmle_tasks, [x for x in args.task_names.split(",") if x] or None,
-                cpu_only=not args.allow_gpu_tasks, require_bounds=not args.allow_missing_bounds,
+                cpu_only=not args.allow_gpu_tasks, require_bounds=args.require_bounds,
                 resources=None if args.keep_original_resources else args.resources.replace("\\n", "\n"),
                 limit=args.max_tasks)
             if not tasks:
@@ -607,6 +613,9 @@ def main(argv=None):
                 records += chunk
                 print(f"[{len(records)}/{len(states)} states] executions={executor.calls} "
                       f"t={time.time() - t0:.0f}s", flush=True)
+    if any("higher_is_better" in r for r in records) and not all(r.get("static_bounds", True) for r in records):
+        from openmle_backend import rescale_records
+        rescale_records(records)  # one fixed utility scale per task for lookahead gains and V
     summary = {"future": analyse(records, args, True), "with_root": analyse(records, args, False)}
     summary["future"]["late_bloomers"] = late_bloomers(records)
     report(summary, records, out, args)

@@ -132,7 +132,7 @@ def _public_prompts(resources: str | None):
     return system, user
 
 
-def load_openmle_tasks(roots, names=None, cpu_only=True, require_bounds=True, resources=None, limit=0):
+def load_openmle_tasks(roots, names=None, cpu_only=True, require_bounds=False, resources=None, limit=0):
     system, user = _public_prompts(resources)
     pkgs = []
     for r in map(Path, roots):
@@ -203,6 +203,65 @@ def static_utility(score, meta) -> float:
     return float(rfu.score2reward_with_static_priority(float(score), m, mode=os.environ["STATIC_REWARD_MAPPING_MODE"],
                                                         priority="leaderboard", fallback_best=FALLBACK_BEST,
                                                         fallback_worst=FALLBACK_WORST))
+
+
+def has_static_bounds(meta) -> bool:
+    best, worst = rfu._preferred_static_bounds_signed(meta, priority="leaderboard")
+    return rfu._finite(best) and rfu._finite(worst)
+
+
+def task_scale(scores, meta, low_pct=0.1):
+    """Frozen per-task utility scale for tasks without leaderboard bounds (most released packages).
+
+    The paper's training reward maps scores with group-adaptive bounds (top1 / top16), so it needs no
+    static bounds; but the static mapping used for SOPO continuation nodes then falls back to +-100 and
+    becomes ~0.5 + score/200, which makes lookahead gains vanish. For the analysis every node of a task is
+    mapped with one fixed scale instead: best = best score seen for the task, worst = its 10th percentile,
+    power_clip (alpha=1) in between. Returns a function score -> utility in [0, 1]."""
+    signed = sorted(rfu.signed_score(float(x), meta) for x in scores if x is not None and rfu._finite(x))
+    if not signed:
+        return None
+    best = signed[-1]
+    worst = signed[min(len(signed) - 1, int(low_pct * len(signed)))]
+    if best - worst < 1e-12:
+        worst = best - max(abs(best), 1.0) * 1e-6
+
+    def f(score):
+        if score is None or not rfu._finite(score):
+            return 0.0
+        v = (rfu.signed_score(float(score), meta) - worst) / (best - worst)
+        return float(min(1.0, max(0.0, v)))
+    return f
+
+
+def rescale_records(records):
+    """Re-map utility / static_value of every node with one frozen scale per task (see task_scale)."""
+    by_task = {}
+    for rec in records:
+        if rec.get("static_bounds"):
+            continue
+        sc = by_task.setdefault(rec["task"], [])
+        for sib in rec["siblings"]:
+            sc.append(sib.get("score"))
+            for ch in [sib["discovery"], *sib["repeats"]]:
+                sc += [n.get("score") for n in ch]
+        sc.append(rec.get("parent_score"))
+    scales = {}
+    for rec in records:
+        if rec.get("static_bounds"):
+            continue
+        meta = {"higher_is_better": rec.get("higher_is_better", True)}
+        f = scales.setdefault(rec["task"], task_scale(by_task[rec["task"]], meta))
+        if f is None:
+            continue
+        if rec.get("parent_score") is not None:
+            rec["parent_utility"] = f(rec["parent_score"])
+        for sib in rec["siblings"]:
+            sib["utility"] = f(sib.get("score")) if sib["eligible"] else 0.0
+            for ch in [sib["discovery"], *sib["repeats"]]:
+                for n in ch:
+                    n["static_value"] = f(n.get("score")) if n["eligible"] else 0.0
+    return records
 
 
 class History:
@@ -442,12 +501,32 @@ class OpenMLEExecutor:
             status = "bad_submission"
         log = rfu.get_clear_log(res.get("run_log"))
         val = rfu.extract_validation_score(log)
-        return Result("valid", status, score, static_utility(score, task.metadata) if score is not None else 0.0,
+        return Result("valid", status, score, self.utility(score, task) if score is not None else 0.0,
                       log[-4000:], time.time() - t0, code,
                       {"status_code": status_code, "payload": payload, "validation_score": val,
                        "result": res.get("result")})
 
     history = None
+    scales: dict = {}
+
+    def utility(self, score, task):
+        if has_static_bounds(task.metadata):
+            return static_utility(score, task.metadata)
+        f = self.scales.get(task.name)
+        return f(score) if f else 0.5  # before seeding there is no scale yet; refreshed by freeze_scales
+
+    def freeze_scales(self, db, tasks):
+        """Fix each task's run-time utility scale from its seed programs (used for parent selection only)."""
+        for t in tasks:
+            if has_static_bounds(t.metadata):
+                continue
+            nodes = db.programs(t.name)
+            f = task_scale([n.result.score for n in nodes if n.result.eligible], t.metadata)
+            if f is None:
+                continue
+            self.scales[t.name] = f
+            for n in nodes:
+                n.result.utility = f(n.result.score) if n.result.eligible else 0.0
 
     def group_rewards(self, task, op, parent, results):
         if self.history is None:
