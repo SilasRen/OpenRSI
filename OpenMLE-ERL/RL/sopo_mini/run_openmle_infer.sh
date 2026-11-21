@@ -8,7 +8,7 @@
 set -euo pipefail
 W=${W:-/online1/hitzy02/hitzy02}
 PY=${PY:-$W/envs/sopo/bin/python}            # env with httpx, black, pandas, scikit-learn, lightgbm, xgboost
-SIF=${SIF:-$W/images/vllm.sif}               # built once with: apptainer pull $SIF docker://<mirror>/vllm/vllm-openai:<tag>
+SIF=${SIF:-$W/images/vllm.sif}               # apptainer pull $SIF docker://docker.m.daocloud.io/vllm/vllm-openai:v0.8.5.post1 (CUDA 12.4, driver 550)
 VLLM=${VLLM:-"apptainer exec --nv --bind $W:$W $SIF vllm"}
 MODEL=${MODEL:-$W/models/Frontis-MA1-30B}
 TASKS=${TASKS:-$W/openmle_tasks}
@@ -27,7 +27,7 @@ mkdir -p "$JOBTMP"
 
 $VLLM serve "$MODEL" --served-model-name Frontis-MA1-30B --tensor-parallel-size "$TP" \
   --max-model-len "$MAX_LEN" --gpu-memory-utilization 0.90 --port "$PORT" \
-  --reasoning-parser qwen3 > "$OUT/vllm.log" 2>&1 &
+  > "$OUT/vllm.log" 2>&1 &   # thinking text is stripped client-side (openmle_backend.strip_thinking)
 VPID=$!
 trap 'kill $VPID 2>/dev/null || true' EXIT
 for i in $(seq 1 180); do
