@@ -8,7 +8,8 @@
 set -euo pipefail
 W=${W:-/online1/hitzy02/hitzy02}
 PY=${PY:-$W/envs/sopo/bin/python}            # env with httpx, black, pandas, scikit-learn, lightgbm, xgboost
-VLLM=${VLLM:-$W/envs/vllm/bin/vllm}          # or: VLLM="apptainer exec --nv $W/vllm.sif vllm"
+SIF=${SIF:-$W/images/vllm.sif}               # built once with: apptainer pull $SIF docker://<mirror>/vllm/vllm-openai:<tag>
+VLLM=${VLLM:-"apptainer exec --nv --bind $W:$W $SIF vllm"}
 MODEL=${MODEL:-$W/models/Frontis-MA1-30B}
 TASKS=${TASKS:-$W/openmle_tasks}
 OUT=${OUT:-$W/infer_openmle_s0}
@@ -18,7 +19,8 @@ PORT=${PORT:-8000}
 MAX_LEN=${MAX_LEN:-40960}
 EXTRA=${EXTRA:-}                              # extra infer_credit flags
 
-cd "$(dirname "$0")"
+module load amd/apptainer/1.2.5 2>/dev/null || true
+cd "${SOPO_DIR:-$W/sopo_rl/sopo_mini}"   # sbatch runs a copy of this script, so do not use $0
 mkdir -p "$OUT"
 JOBTMP=${TMPDIR:-/tmp}/openmle_jobs_$SLURM_JOB_ID
 mkdir -p "$JOBTMP"
