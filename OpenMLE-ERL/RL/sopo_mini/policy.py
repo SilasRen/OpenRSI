@@ -112,8 +112,9 @@ class HFPolicy:
 
 # ------------------------------------------------------------------ fake policy for tests
 
-_READ = "import pandas as pd, numpy as np\ntr = pd.read_csv('train.csv'); te = pd.read_csv('test.csv')\n"
-_PREP = ("X = tr.drop(columns=['id', 'target']); y = tr['target']; Xt = te.drop(columns=['id'])\n"
+_READ = ("import pandas as pd, numpy as np\ntr = pd.read_csv('train.csv'); te = pd.read_csv('test.csv')\n"
+         "T = [c for c in tr.columns if c not in te.columns][0]\n")
+_PREP = ("X = tr.drop(columns=['id', T]); y = tr[T]; Xt = te.drop(columns=['id'])\n"
          "for c in X.columns:\n"
          "    if not pd.api.types.is_numeric_dtype(X[c]):\n"
          "        cats = {v: i for i, v in enumerate(sorted(X[c].dropna().unique()))}\n"
@@ -122,16 +123,16 @@ _PREP = ("X = tr.drop(columns=['id', 'target']); y = tr['target']; Xt = te.drop(
          "X = X.fillna(X.median()); Xt = Xt.fillna(X.median())\n")
 _FAKE = {
     "crash": _READ + "raise RuntimeError('boom')\n",
-    "constant": _READ + "pred = tr['target'].mean() if tr['target'].nunique() > 20 else tr['target'].mode()[0]\n"
-                "pd.DataFrame({'id': te['id'], 'target': pred}).to_csv('submission.csv', index=False)\n",
+    "constant": _READ + "pred = tr[T].mean() if tr[T].nunique() > 20 else tr[T].mode()[0]\n"
+                "pd.DataFrame({'id': te['id'], T: pred}).to_csv('submission.csv', index=False)\n",
     "linear": _READ + _PREP + "from sklearn.linear_model import Ridge, LogisticRegression\n"
               "reg = y.nunique() > 20\nm = Ridge() if reg else LogisticRegression(max_iter=500)\nm.fit(X, y)\n"
               "p = m.predict(Xt) if reg or y.nunique() > 2 else m.predict_proba(Xt)[:, 1]\n"
-              "pd.DataFrame({'id': te['id'], 'target': p}).to_csv('submission.csv', index=False)\n",
+              "pd.DataFrame({'id': te['id'], T: p}).to_csv('submission.csv', index=False)\n",
     "gbm": _READ + _PREP + "from sklearn.ensemble import HistGradientBoostingRegressor as R, "
            "HistGradientBoostingClassifier as C\nreg = y.nunique() > 20\nm = R() if reg else C()\nm.fit(X, y)\n"
            "p = m.predict(Xt) if reg or y.nunique() > 2 else m.predict_proba(Xt)[:, 1]\n"
-           "pd.DataFrame({'id': te['id'], 'target': p}).to_csv('submission.csv', index=False)\n",
+           "pd.DataFrame({'id': te['id'], T: p}).to_csv('submission.csv', index=False)\n",
 }
 _NEXT = {"crash": "constant", "constant": "linear", "linear": "gbm", "gbm": "gbm"}
 

@@ -29,7 +29,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-METRICS = {"accuracy": True, "roc_auc": True, "macro_f1": True, "rmse": False}
+METRICS = {"accuracy": True, "roc_auc": True, "macro_f1": True, "rmse": False, "rmsle": False}
 
 
 @dataclass
@@ -64,6 +64,9 @@ def compute_metric(metric: str, y_true, pred) -> float:
         return float(roc_auc_score(y_true, pred.astype(float)))
     if metric == "rmse":
         return float(math.sqrt(mean_squared_error(y_true, pred.astype(float))))
+    if metric == "rmsle":
+        p = np.log1p(np.clip(pred.astype(float), 0, None))
+        return float(math.sqrt(mean_squared_error(np.log1p(y_true.astype(float)), p)))
     raise ValueError(metric)
 
 
@@ -74,7 +77,7 @@ def to_utility(score: float, private: dict) -> float:
     span = ref - dumb
     if not math.isfinite(score) or abs(span) < 1e-12:
         return 0.0
-    return float(min(1.5, max(0.0, (score - dumb) / span)))
+    return float(min(private.get("cap", 1.5), max(0.0, (score - dumb) / span)))
 
 
 # ---------------------------------------------------------------- generators
@@ -173,11 +176,14 @@ def _reference_scores(train: pd.DataFrame, test: pd.DataFrame, y_tr, y_te, metri
     enc = make_column_transformer(
         (OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1), make_column_selector(dtype_exclude="number")),
         remainder="passthrough")
-    if metric == "rmse":
+    if metric in ("rmse", "rmsle"):
+        log = metric == "rmsle"
+        fwd, inv = (np.log1p, np.expm1) if log else (np.asarray, np.asarray)
+        yt = fwd(np.asarray(y_tr, dtype=float))
         model = make_pipeline(enc, HistGradientBoostingRegressor(random_state=0))
-        model.fit(train, y_tr)
-        ref = compute_metric(metric, y_te, model.predict(test))
-        dumb = compute_metric(metric, y_te, np.full(len(y_te), float(np.mean(y_tr))))
+        model.fit(train, yt)
+        ref = compute_metric(metric, y_te, inv(model.predict(test)))
+        dumb = compute_metric(metric, y_te, np.full(len(y_te), float(inv(np.mean(yt)))))
     else:
         model = make_pipeline(enc, HistGradientBoostingClassifier(random_state=0))
         model.fit(train, y_tr)
@@ -197,6 +203,7 @@ def _describe(name: str, metric: str, train: pd.DataFrame, target: str, n_test: 
         "accuracy": f"the predicted class label of `{target}`",
         "macro_f1": f"the predicted class label of `{target}`",
         "rmse": f"the predicted numeric value of `{target}`",
+        "rmsle": f"the predicted (positive) numeric value of `{target}`",
     }[metric]
     desc = (f"Tabular {task_type} task `{name}`. Predict `{target}` for every row of test.csv.\n"
             f"Evaluation metric: {metric} ({'higher' if METRICS[metric] else 'lower'} is better).\n"
