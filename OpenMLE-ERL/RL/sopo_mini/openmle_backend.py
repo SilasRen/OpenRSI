@@ -427,7 +427,7 @@ class _Choice:
 
 
 class ModelJudge:
-    def __init__(self, url, model, max_tokens=4096):
+    def __init__(self, url, model, max_tokens=8192):
         self.url, self.model, self.max_tokens = url, model, max_tokens
 
     def __call__(self, code: str):

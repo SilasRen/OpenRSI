@@ -9,7 +9,7 @@ set -euo pipefail
 W=${W:-/online1/hitzy02/hitzy02}
 PY=${PY:-$W/envs/sopo/bin/python}            # env with httpx, black, pandas, scikit-learn, lightgbm, xgboost
 SIF=${SIF:-$W/images/vllm.sif}               # apptainer pull $SIF docker://docker.m.daocloud.io/vllm/vllm-openai:v0.8.5.post1 (CUDA 12.4, driver 550)
-VLLM=${VLLM:-"apptainer exec --nv --bind $W:$W $SIF vllm"}
+VLLM=${VLLM:-"apptainer exec --nv --env HF_HUB_OFFLINE=1 --bind $W:$W $SIF vllm"}
 MODEL=${MODEL:-$W/models/Frontis-MA1-30B}
 TASKS=${TASKS:-$W/openmle_tasks}
 OUT=${OUT:-$W/infer_openmle_s0}
