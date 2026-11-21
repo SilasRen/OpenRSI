@@ -56,8 +56,20 @@ from adaptive_reward_advantage_utils import score_to_group_adaptive_reward  # no
 
 from executor import Result  # noqa: E402
 
-TEMPLATE = REPO / "OpenMLE-Gym" / "openmle_gym" / "templates" / "selfvalid0327-sft4.json"
-SCORER = REPO / "OpenMLE-Gym" / "openmle-sandbox" / "node_workers" / "read_and_metric.py"
+def _first(env, *cands):
+    if os.getenv(env):
+        return Path(os.environ[env])
+    for c in cands:
+        if c.exists():
+            return c
+    return cands[0]
+
+
+# Repo layout, or the cluster layout (<W>/sopo_rl = RL dir, <W>/sopo_gym_files = copied Gym files).
+TEMPLATE = _first("OPENMLE_TEMPLATE", REPO / "OpenMLE-Gym" / "openmle_gym" / "templates" / "selfvalid0327-sft4.json",
+                  RL_DIR.parent / "sopo_gym_files" / "templates" / "selfvalid0327-sft4.json")
+SCORER = _first("OPENMLE_SCORER", REPO / "OpenMLE-Gym" / "openmle-sandbox" / "node_workers" / "read_and_metric.py",
+                RL_DIR.parent / "sopo_gym_files" / "node_workers" / "read_and_metric.py")
 ADAPTIVE = dict(mode=os.getenv("ADAPTIVE_REWARD_BOUND_MODE", "top1_top16"),
                 lower_shift_ratio=float(os.getenv("ADAPTIVE_REWARD_BOUND_LOWER_SHIFT_RATIO", "0.25")),
                 single_finite_reward_one=os.getenv("ADAPTIVE_BOUND_SINGLE_FINITE_REWARD_ONE", "1") != "0")
