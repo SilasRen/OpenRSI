@@ -128,6 +128,8 @@ def build_states(policy, executor, tasks, args, rng, out):
     results = executor.run_many(jobs)
     k = 0
     for i, row in enumerate(gens):
+        if hasattr(executor, "group_rewards"):  # stores the original base reward used later as parent reference
+            executor.group_rewards(tasks[i], "draft", None, results[k:k + len(row)])
         for g in row:
             db.add(tasks[i].name, "draft", results[k].code, g.text, results[k], None)
             k += 1
@@ -173,7 +175,13 @@ def collect_chunk(policy, executor, states, args):
     results = executor.run_many(jobs)
     roots = []
     k = 0
+    r0s = []
     for i, (task, op, parent) in enumerate(states):
+        grp = results[k:k + len(gens[i])]
+        if hasattr(executor, "group_rewards"):
+            r0s += executor.group_rewards(task, op, parent, grp)
+        else:
+            r0s += [immediate_reward(op, res, parent) for res in grp]
         for g in gens[i]:
             res = results[k]
             k += 1
@@ -189,7 +197,10 @@ def collect_chunk(policy, executor, states, args):
             sib.append({
                 "category": node.result.category, "status": node.result.status,
                 "utility": node.utility, "eligible": node.result.eligible,
-                "r0": immediate_reward(op, node.result, parent),
+                "r0": r0s[idx],
+                "score": node.result.score,
+                "base_reward": node.result.extra.get("base_reward"),
+                "judge": node.result.extra.get("judge_reason"),
                 "log_tail": node.result.log[-400:] if node.result.status != "ok" else "",
                 "discovery": discovery[idx],
                 "repeats": [rep[idx] for rep in repeats],
@@ -481,7 +492,7 @@ def plot(summary, records, out, args):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Inference-only comparison of single-step vs multi-step GSPO reward")
-    ap.add_argument("--tasks", required=True, help="task dir built by tasks.py (built here if missing)")
+    ap.add_argument("--tasks", default=None, help="synthetic task dir built by tasks.py (built here if missing)")
     ap.add_argument("--split", default="train")
     ap.add_argument("--out", required=True)
     ap.add_argument("--model", default="Qwen/Qwen2.5-Coder-0.5B-Instruct")
@@ -509,21 +520,72 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--report-only", action="store_true")
+    g = ap.add_argument_group("real OpenMLE task packages (paper prompts, sandbox scoring and reward)")
+    g.add_argument("--openmle-tasks", nargs="+", default=None,
+                   help="task package dir(s) (data/public, data/private, utils/metric.py, info/task_metadata.json)")
+    g.add_argument("--task-names", default="", help="comma list to restrict the packages")
+    g.add_argument("--max-tasks", type=int, default=0)
+    g.add_argument("--allow-gpu-tasks", action="store_true")
+    g.add_argument("--allow-missing-bounds", action="store_true",
+                   help="keep tasks without leaderboard/theoretical bounds (static utility then uses +-100)")
+    g.add_argument("--model-url", default="http://127.0.0.1:8000/v1", help="OpenAI-compatible server (vLLM)")
+    g.add_argument("--model-name", default="Frontis-MA1-30B", help="served model name")
+    g.add_argument("--concurrency", type=int, default=32, help="parallel model requests")
+    g.add_argument("--judge", choices=["model", "none"], default="model",
+                   help="hack check with the released judge prompt, sent to the policy server")
+    g.add_argument("--apptainer-image", default=None, help="run generated programs inside this .sif")
+    g.add_argument("--program-python", default=sys.executable)
+    g.add_argument("--program-gpus", default="", help="CUDA_VISIBLE_DEVICES for generated programs")
+    g.add_argument("--resources", default="- CPU: 6 cores\n - System Memory (RAM): 32 GB\n - GPU: none",
+                   help="resource paragraph written into the public system prompt")
+    g.add_argument("--keep-original-resources", action="store_true")
+    g.add_argument("--job-workdir", default=None, help="scratch dir for program runs (default: $TMPDIR)")
     args = ap.parse_args(argv)
+    if not args.tasks and not args.openmle_tasks:
+        ap.error("give --tasks (synthetic) or --openmle-tasks (real packages)")
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     rec_path = out / "records.jsonl"
     records = [json.loads(line) for line in rec_path.read_text().splitlines()] if rec_path.exists() else []
     if not args.report_only:
-        if not (Path(args.tasks) / "splits.json").exists():
+        if args.openmle_tasks:
+            pass
+        elif not (Path(args.tasks) / "splits.json").exists():
             import tasks as tasks_mod
             tasks_mod.main(["--out", args.tasks, "--train-per-kind", "3", "--eval-per-kind", "2"])
         (out / "config.json").write_text(json.dumps(vars(args), indent=1))
         rng = random.Random(args.seed)
-        tasks = load_tasks(Path(args.tasks), args.split)
-        rng.shuffle(tasks)
-        if args.fake_policy:
+        if args.openmle_tasks:
+            import openmle_backend as ob
+            import train as train_mod
+            tasks = ob.load_openmle_tasks(
+                args.openmle_tasks, [x for x in args.task_names.split(",") if x] or None,
+                cpu_only=not args.allow_gpu_tasks, require_bounds=not args.allow_missing_bounds,
+                resources=None if args.keep_original_resources else args.resources.replace("\\n", "\n"),
+                limit=args.max_tasks)
+            if not tasks:
+                raise SystemExit("no usable OpenMLE task package")
+            print(f"{len(tasks)} OpenMLE tasks: {', '.join(t.name for t in tasks[:20])}", flush=True)
+            global extract_code
+            extract_code = ob.extract
+            train_mod.extract_code = ob.extract
+            rng.shuffle(tasks)
+            if args.fake_policy:
+                policy = ob.FakeOpenMLEPolicy(args.seed)
+                judge = None
+            else:
+                policy = ob.OpenAIPolicy(args.model_url, args.model_name, args.concurrency, args.seed)
+                judge = ob.ModelJudge(args.model_url, args.model_name) if args.judge == "model" else None
+            sandbox = ob.LocalSandbox(job_timeout=args.timeout, workdir=args.job_workdir, python=args.program_python,
+                                      apptainer_image=args.apptainer_image, program_gpus=args.program_gpus)
+            executor = ob.OpenMLEExecutor(sandbox, judge, args.workers)
+        else:
+            tasks = load_tasks(Path(args.tasks), args.split)
+            rng.shuffle(tasks)
+        if args.openmle_tasks:
+            pass
+        elif args.fake_policy:
             from policy import FakePolicy
             policy = FakePolicy(args.seed)
         else:
@@ -532,7 +594,8 @@ def main(argv=None):
             torch.manual_seed(args.seed)
             policy = HFPolicy(args.model, device=args.device, gen_batch=args.gen_batch, train=False,
                               grad_checkpointing=False)
-        executor = Executor(args.workers, args.timeout, args.mem_gb)
+        if not args.openmle_tasks:
+            executor = Executor(args.workers, args.timeout, args.mem_gb)
         states = build_states(policy, executor, tasks, args, rng, out)
         with open(rec_path, "a") as f:
             for s in range(len(records), len(states), args.chunk):

@@ -42,6 +42,9 @@ class Node:
 
 
 def build_messages(op: str, task: Task, parent: Node | None = None) -> list[dict]:
+    if getattr(task, "is_openmle", False):  # real OpenMLE package: the released prompt_builder prompts
+        from openmle_backend import build_messages as openmle_messages
+        return openmle_messages(op, task, parent)
     head = ("We will now provide a description of the task.\n\nTask Description:\n\n"
             f"{task.description}\n\nData Description:\n\n{task.data_description}\n\n")
     if op == "draft":
