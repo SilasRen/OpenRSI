@@ -16,7 +16,6 @@ SLOTS=${SLOTS:-12}                                    # parallel sequences per s
 SLOT_CTX=${SLOT_CTX:-32768}
 EXTRA=${EXTRA:-}
 
-export LD_LIBRARY_PATH=$BUILD_ENV/lib:${LD_LIBRARY_PATH:-}
 export no_proxy=127.0.0.1,localhost${no_proxy:+,$no_proxy} NO_PROXY=127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}  # local server must bypass the cluster proxy
 cd "${SOPO_DIR:-$W/sopo_rl/sopo_mini}"
 mkdir -p "$OUT"
@@ -27,7 +26,8 @@ trap cleanup EXIT
 i=0
 for s in $SEEDS; do
   port=$((8000 + i))
-  CUDA_VISIBLE_DEVICES=$i "$SERVER" -m "$GGUF" --alias Frontis-MA1-30B -ngl 999 -fa on --jinja \
+  # build-env libs only for the server: exported globally they break system curl and python
+  LD_LIBRARY_PATH=$BUILD_ENV/lib:${LD_LIBRARY_PATH:-} CUDA_VISIBLE_DEVICES=$i "$SERVER" -m "$GGUF" --alias Frontis-MA1-30B -ngl 999 -fa on --jinja \
     -np "$SLOTS" -c $((SLOTS * SLOT_CTX)) --host 127.0.0.1 --port "$port" > "$OUT/llama_server_s$s.log" 2>&1 &
   PIDS+=($!)
   i=$((i + 1))
