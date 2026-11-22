@@ -17,6 +17,10 @@ SLOTS=${SLOTS:-12}                                    # parallel sequences per s
 SLOT_CTX=${SLOT_CTX:-32768}
 EXTRA=${EXTRA:-}
 
+# Like the original sandbox: shared HF/torch caches and model downloads through hf-mirror (SANDBOX_ONLINE=0 to disable).
+export SANDBOX_ONLINE=${SANDBOX_ONLINE:-1} SANDBOX_PROXY=${SANDBOX_PROXY:-}
+export SANDBOX_HF_HOME=${SANDBOX_HF_HOME:-$W/sandbox_cache/hf_home} SANDBOX_TORCH_HOME=${SANDBOX_TORCH_HOME:-$W/sandbox_cache/torch_home}
+mkdir -p "$SANDBOX_HF_HOME" "$SANDBOX_TORCH_HOME"
 export no_proxy=127.0.0.1,localhost${no_proxy:+,$no_proxy} NO_PROXY=127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}  # local server must bypass the cluster proxy
 cd "${SOPO_DIR:-$W/sopo_rl/sopo_mini}"
 mkdir -p "$OUT"

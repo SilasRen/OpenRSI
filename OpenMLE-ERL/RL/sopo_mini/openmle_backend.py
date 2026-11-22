@@ -363,6 +363,18 @@ class LocalSandbox:
                    "CUDA_VISIBLE_DEVICES": self.program_gpus, "OMP_NUM_THREADS": os.environ.get("PROGRAM_THREADS", "6"),
                    "MKL_NUM_THREADS": os.environ.get("PROGRAM_THREADS", "6"), "LANG": "C.UTF-8",
                    "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
+            # The original sandbox shares one HF/torch cache and can download models (HF_ENDPOINT=hf-mirror.com).
+            # SANDBOX_HF_HOME / SANDBOX_TORCH_HOME / SANDBOX_ONLINE=1 (+ SANDBOX_PROXY) reproduce that.
+            for k in ("HF_HOME", "TORCH_HOME"):
+                if os.environ.get("SANDBOX_" + k):
+                    env[k] = os.environ["SANDBOX_" + k]
+            if os.environ.get("SANDBOX_ONLINE") == "1":
+                env.pop("HF_HUB_OFFLINE"), env.pop("TRANSFORMERS_OFFLINE")
+                env["HF_ENDPOINT"] = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
+                proxy = os.environ.get("SANDBOX_PROXY")
+                if proxy:
+                    env.update(http_proxy=proxy, https_proxy=proxy, HTTP_PROXY=proxy, HTTPS_PROXY=proxy,
+                               no_proxy="127.0.0.1,localhost", NO_PROXY="127.0.0.1,localhost")
             stdout = job / "stdout.txt"
             rc, timed_out = _run(self._program_cmd(job, public), job, env, self.job_timeout, stdout)
             out = stdout.read_text(errors="replace")[-20000:]
