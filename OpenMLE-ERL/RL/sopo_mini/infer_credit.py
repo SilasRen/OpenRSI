@@ -126,6 +126,15 @@ def build_states(policy, executor, tasks, args, rng, out):
     gens = policy.generate(prompts, args.seed_drafts, args.max_new_tokens, args.temperature)
     jobs = [(extract_code(g.text), tasks[i]) for i, row in enumerate(gens) for g in row]
     results = executor.run_many(jobs)
+    with open(out / "drafts.jsonl", "w") as f:  # why seed drafts fail: status, error tail, response length
+        k = 0
+        for i, row in enumerate(gens):
+            for g in row:
+                r = results[k]
+                f.write(json.dumps(dict(task=tasks[i].name, category=r.category, status=r.status, score=r.score,
+                                        runtime=round(r.runtime, 1), response_chars=len(g.text),
+                                        has_code=bool(r.code.strip()), log_tail=(r.log or "")[-1500:])) + "\n")
+                k += 1
     k = 0
     for i, row in enumerate(gens):
         if hasattr(executor, "group_rewards"):  # stores the original base reward used later as parent reference
