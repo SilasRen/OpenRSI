@@ -6,6 +6,7 @@
 set -euo pipefail
 W=${W:-/online1/hitzy02/hitzy02}
 PY=${PY:-$W/envs/sopo/bin/python}
+PROG_PY=${PROG_PY:-$PY}                               # python that runs the generated programs (sandbox packages)
 BUILD_ENV=${BUILD_ENV:-$W/envs/build}                 # conda env that compiled llama.cpp (runtime libs)
 SERVER=${SERVER:-$W/llama.cpp/build/bin/llama-server}
 GGUF=${GGUF:-$W/models/Frontis-MA1-30B-GGUF/Frontis-MA1-30B-Q4_K_M.gguf}
@@ -53,7 +54,7 @@ for s in $SEEDS; do
   PROGRAM_THREADS=${PROGRAM_THREADS:-4} $PY infer_credit.py \
     --openmle-tasks "$TASKS" --out "${OUT}_s$s" --seed "$s" \
     --model-url "http://127.0.0.1:$port/v1" --model-name Frontis-MA1-30B \
-    --program-python "$PY" --job-workdir "$JOBTMP" \
+    --program-python "$PROG_PY" --job-workdir "$JOBTMP" \
     --improve-only --parent-range 0.2,0.8 --num-states ${NUM_STATES:-16} --group-size ${GROUP:-8} \
     --steps 2 --repeats ${REPEATS:-2} --seed-drafts ${SEED_DRAFTS:-8} \
     --max-new-tokens ${MAX_NEW:-24576} --temperature 1.0 --timeout ${JOB_TIMEOUT:-1200} \
