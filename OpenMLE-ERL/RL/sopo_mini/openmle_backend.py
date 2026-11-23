@@ -245,6 +245,7 @@ def rescale_records(records):
             sc.append(sib.get("score"))
             for ch in [sib["discovery"], *sib["repeats"]]:
                 sc += [n.get("score") for n in ch]
+                sc += [c.get("score") for n in ch for c in n.get("cands", [])]
         sc.append(rec.get("parent_score"))
     scales = {}
     for rec in records:
@@ -261,6 +262,8 @@ def rescale_records(records):
             for ch in [sib["discovery"], *sib["repeats"]]:
                 for n in ch:
                     n["static_value"] = f(n.get("score")) if n["eligible"] else 0.0
+                    for c in n.get("cands", []):
+                        c["static_value"] = f(c.get("score")) if c["eligible"] else 0.0
     return records
 
 

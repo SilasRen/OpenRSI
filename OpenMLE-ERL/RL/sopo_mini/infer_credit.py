@@ -177,6 +177,44 @@ def build_states(policy, executor, tasks, args, rng, out):
     return states
 
 
+def run_lookahead_bestof(policy, executor, items, steps, n, args):
+    """Improve-only best-of-n lookahead (beam width 1).
+
+    Only roots that were scored are continued. At each depth the current node gets n independent Improve
+    children; the best scored child becomes the chain node (all n are kept under "cands", so mean-of-n is
+    available too) and the next depth improves on it. A depth where no child is scored ends the chain, so a
+    chain never contains Debug steps."""
+    from operators import Node
+
+    chains = [[node_dict(nd.result)] for _, nd in items]
+    current = [nd for _, nd in items]
+    active = [i for i, (_, nd) in enumerate(items) if nd.result.eligible]
+    for _depth in range(steps):
+        if not active:
+            break
+        prompts = [build_messages("improve", items[i][0], current[i]) for i in active]
+        gens = policy.generate(prompts, n, args.max_new_tokens, args.temperature)
+        jobs = [(extract_code(g.text), items[i][0]) for row, i in zip(gens, active) for g in row]
+        results = executor.run_many(jobs)
+        k, nxt = 0, []
+        for row, i in zip(gens, active):
+            kids = []
+            for g in row:
+                kids.append((results[k], g.text, jobs[k][0]))
+                k += 1
+            scored = [x for x in kids if x[0].eligible]
+            if not scored:
+                continue
+            best = max(scored, key=lambda x: x[0].utility)
+            d = node_dict(best[0], "improve")
+            d["cands"] = [node_dict(x[0], "improve") for x in kids]
+            chains[i].append(d)
+            current[i] = Node(-1, items[i][0].name, "improve", best[2], best[1], best[0], None)
+            nxt.append(i)
+        active = nxt
+    return chains
+
+
 def collect_chunk(policy, executor, states, args):
     from operators import Node
 
@@ -197,8 +235,13 @@ def collect_chunk(policy, executor, states, args):
             res = results[k]
             k += 1
             roots.append((task, Node(-1, task.name, op, res.code, g.text, res, parent.id if parent else None)))
-    discovery = run_lookahead(policy, executor, roots, args.steps, args)
-    repeats = [run_lookahead(policy, executor, roots, args.steps, args) for _ in range(args.repeats)]
+    if args.cont_mode == "bestof":  # reward signal and V come from independent best-of-n chains
+        discovery = run_lookahead_bestof(policy, executor, roots, args.steps, args.cont_n, args)
+        repeats = [run_lookahead_bestof(policy, executor, roots, args.steps, args.cont_n, args)
+                   for _ in range(args.repeats)]
+    else:
+        discovery = run_lookahead(policy, executor, roots, args.steps, args)
+        repeats = [run_lookahead(policy, executor, roots, args.steps, args) for _ in range(args.repeats)]
     records = []
     for i, (task, op, parent) in enumerate(states):
         sib = []
@@ -274,6 +317,8 @@ def analyse(records, args, future_only=True):
             exceed = {n: [0, 0] for n in names}
             top_change = {n: [0, 0] for n in names}
         runnable = [i for i, s in enumerate(sibs) if s["category"] == "valid"]
+        if getattr(args, "cont_mode", "chain") == "bestof":  # compare only scored siblings (Improve signal)
+            runnable = [i for i in runnable if sibs[i]["eligible"]]
         if len(runnable) < 2:
             continue
         n_groups += 1
@@ -524,6 +569,10 @@ def main(argv=None):
     ap.add_argument("--parent-range", default="0.2,0.8")
     ap.add_argument("--seed-scripted", default="",
                     help="also seed these fixed programs as candidate parents, e.g. 'linear,constant'")
+    ap.add_argument("--cont-mode", choices=["chain", "bestof"], default="chain",
+                    help="chain: one continuation per step, failed roots get Debug; bestof: only scored roots, "
+                         "n Improve children per step, continue from the best (beam width 1)")
+    ap.add_argument("--cont-n", type=int, default=4, help="children per step in --cont-mode bestof")
     ap.add_argument("--chunk", type=int, default=4, help="states per generation batch (resume granularity)")
     ap.add_argument("--max-new-tokens", type=int, default=1024)
     ap.add_argument("--temperature", type=float, default=1.0)

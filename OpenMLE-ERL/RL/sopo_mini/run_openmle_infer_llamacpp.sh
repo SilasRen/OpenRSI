@@ -60,7 +60,7 @@ for s in $SEEDS; do
     --model-url "http://127.0.0.1:$port/v1" --model-name Frontis-MA1-30B \
     --program-python "$PROG_PY" --job-workdir "$JOBTMP" \
     --improve-only --parent-range ${PARENT_RANGE:-0.0,1.0} --num-states ${NUM_STATES:-16} --group-size ${GROUP:-8} \
-    --steps 2 --repeats ${REPEATS:-2} --seed-drafts ${SEED_DRAFTS:-8} \
+    --steps ${STEPS:-2} --repeats ${REPEATS:-2} --cont-mode ${CONT_MODE:-chain} --cont-n ${CONT_N:-4} --seed-drafts ${SEED_DRAFTS:-8} \
     --max-new-tokens ${MAX_NEW:-24576} --temperature 1.0 --timeout ${JOB_TIMEOUT:-3600} \
     --workers ${WORKERS:-4} --concurrency "$SLOTS" $EXTRA > "${OUT}_s$s.log" 2>&1 &
   RUNS+=($!)
