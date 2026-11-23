@@ -46,7 +46,7 @@ sys.path.insert(0, str(HERE.parent))
 from executor import Executor, extract_code  # noqa: E402
 from operators import ProgramDB, build_messages, immediate_reward  # noqa: E402
 from tasks import load_tasks  # noqa: E402
-from sopo import combine_reward  # noqa: E402
+from sopo import combine_reward, lookahead_bonus  # noqa: E402
 from train import node_dict, run_lookahead  # noqa: E402
 
 
@@ -281,12 +281,18 @@ def signals(sib, op_parent_reward_fn, K, lams):
             out[f"best_K{k}"] = r0
             for lam in lams:
                 out[f"credit_K{k}_l{lam:g}"] = r0
+                out[f"creditabs_K{k}_l{lam:g}"] = r0
         return out
+    root = sib["discovery"][0]
+    s0 = float(root["static_value"]) if root["eligible"] else 0.0
     for k in range(1, K + 1):
         chain = sib["discovery"][:k + 1]
         out[f"best_K{k}"] = combine_reward(chain, r0, "best", 1.0)[0]
         for lam in lams:
             out[f"credit_K{k}_l{lam:g}"] = combine_reward(chain, r0, "credit", lam)[0]
+            # Same discounted gains, but on the root's static value instead of r0, so both terms share one
+            # scale (r0 may carry group normalisation and the parent-gain bonus). lam=1 equals best_K.
+            out[f"creditabs_K{k}_l{lam:g}"] = s0 + lookahead_bonus(chain, lam)
     return out
 
 
